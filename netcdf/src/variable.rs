@@ -1,6 +1,6 @@
 //! Variables in the netcdf file
 #![allow(clippy::similar_names)]
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr::addr_of;
@@ -1155,6 +1155,87 @@ impl<'g> VariableMut<'g> {
     {
         let extents: Extents = extent.try_into().map_err(Into::into)?;
         self.put_string_mono(value, &extents)
+    }
+
+    /// Inserts an array of strings into the NetCDF variable, ensuring the dimensions match.
+    ///
+    /// This function takes a slice of values that can be converted to strings, verifies
+    /// that the number of elements matches the product of the dimensions of the variable,
+    /// and then inserts them into the NetCDF variable.
+    ///
+    /// # Arguments
+    ///
+    /// * `values` - A slice of values that implement the `AsRef<str>` trait, representing
+    /// the strings to be inserted.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the operation is successful.
+    /// * `Err(error::Error::BufferLen)` - If the number of elements in `values` does not
+    /// match the product of the dimensions of the variable.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// * The length of `values` does not match the product of the dimensions of the variable.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if any string in `values` contains an interior null byte.
+    /// This is because `CString::new` will panic if it encounters an interior null byte.
+    ///
+    /// # Implementation Details
+    ///
+    /// 1. The function calculates the expected number of elements by multiplying the lengths
+    ///    of the dimensions of the variable.
+    /// 2. It checks if the length of `values` matches this expected number. If not, it returns
+    ///    a `BufferLen` error.
+    /// 3. It converts each string in `values` to a `CString`, ensuring no interior null bytes
+    ///    are present.
+    /// 4. It creates a vector of pointers to these C strings.
+    /// 5. It calls the `nc_put_var_string` function from the NetCDF C library within an unsafe
+    ///    block to insert the strings into the variable.
+    ///
+    /// # See Also
+    ///
+    /// * [NetCDF C library documentation](https://www.unidata.ucar.edu/software/netcdf/docs/)
+    /// * `nc_put_var_string` function in the NetCDF C library
+    pub fn put_strings(&mut self, values: &[impl AsRef<str>]) -> error::Result<()> {
+        // Check that all len of all the values is the same as the dimensions product len
+        let number_of_elements = self
+            .dimensions()
+            .iter()
+            .map(|d| d.len())
+            .fold(1, usize::saturating_mul);
+
+        if values.len() != number_of_elements {
+            return Err(error::Error::BufferLen {
+                wanted: number_of_elements,
+                actual: values.len(),
+            });
+        }
+
+        // Convert each string to a CString, ensuring no interior null bytes are present
+        let ptr_array: Vec<CString> = values
+            .iter()
+            .map(|s| {
+                let s = s.as_ref();
+                // Convert the string to a CString, panicking if an interior null byte is found
+                let cstr = CString::new(s).expect("String contained interior 0");
+                cstr
+            })
+            .collect();
+
+        // Create a vector of pointers to the C strings
+        let mut ptrs: Vec<*const c_char> = ptr_array.iter().map(|s| s.as_ptr()).collect();
+
+        // Call the NetCDF C function to insert the strings into the variable, wrapped in an unsafe block
+        unsafe {
+            // Use a checked function to handle potential errors from the NetCDF function call
+            error::checked(super::with_lock(|| {
+                nc_put_var_string(self.ncid, self.varid, ptrs.as_mut_ptr())
+            }))
+        }
     }
 
     fn put_values_mono<T: NcPutGet>(
