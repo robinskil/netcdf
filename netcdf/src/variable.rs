@@ -364,6 +364,26 @@ impl Variable<'_> {
         Ok(elems.pop().unwrap())
     }
 
+    /// Get strings from this variable
+    pub fn get_strings<E>(&self, extents: E) -> error::Result<Vec<String>>
+    where
+        E: TryInto<Extents>,
+        E::Error: Into<error::Error>,
+    {
+        let extents = extents.try_into().map_err(Into::into)?;
+        let mut elems = self.get_values_mono::<super::types::NcString>(&extents)?;
+        let mut strings = Vec::with_capacity(elems.len());
+        for item in elems.iter() {
+            let cstr = unsafe { std::ffi::CStr::from_ptr(item.0) };
+            let s = cstr.to_string_lossy().to_string();
+            strings.push(s);
+        }
+        checked_with_lock(|| unsafe {
+            netcdf_sys::nc_free_string(elems.len(), elems.as_mut_ptr().cast())
+        })?;
+        Ok(strings)
+    }
+
     /// Get a string from this variable
     pub fn get_string<E>(&self, extents: E) -> error::Result<String>
     where
